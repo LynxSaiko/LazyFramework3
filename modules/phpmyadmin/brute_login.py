@@ -151,40 +151,43 @@ class UltraFastTargetScanner:
                 border_style="cyan",
                 padding=(1, 2)
             ))
-        
+        progress_bar = None
         # Progress bar untuk scanning
         if TQDM_AVAILABLE:
-            self.progress_bar = tqdm(
+           progress_bar = tqdm(
                 total=len(common_paths),
                 desc="Scanning Paths",
                 unit="path",
-                ncols=70,
-                bar_format="{l_bar}{bar:30}| {n_fmt}/{total_fmt} paths",
+                ncols=80,
+                bar_format="{l_bar}{bar:40}| {n_fmt}/{total_fmt} paths",
                 position=0,  # Pastikan di position 0
                 leave=True   # Jangan tinggalkan progress bar setelah selesai
             )
 
-        for path in common_paths:
-            test_url = f"{self.base_target.rstrip('/')}{path}"
-            status_info = self.check_url_status(test_url)
             
-            if status_info["accessible"]:
-                self.found_paths.append(status_info)
-                if TQDM_AVAILABLE:
-                    self.progress_bar.set_description(f"✅ Found: {path}")
-                break
-            if TQDM_AVAILABLE:
-                self.progress_bar.update(1)
-        
-        if TQDM_AVAILABLE:
-            self.progress_bar.close()
-        
+            for path in common_paths:
+                test_url = f"{self.base_target.rstrip('/')}{path}"
+                if TQDM_AVAILABLE and progress_bar:
+                    progress_bar.set_description(f"🔍 Scanning: {path}")
+                status_info = self.check_url_status(test_url)
+                # Update progress bar
+                if TQDM_AVAILABLE and progress_bar:
+                    progress_bar.update(1)
+
+                if status_info["accessible"]:
+                    self.found_paths.append(status_info)
+                    if TQDM_AVAILABLE and progress_bar:
+                       progress_bar.set_description(f"✅ Found: {path}")
+                    break
+           if TQDM_AVAILABLE and progress_bar:
+               progress_bar.close()
+          
         # Tampilkan hasil scan
-        if self.found_paths and RICH_AVAILABLE:
-            self.display_scan_results()
+           if self.found_paths and RICH_AVAILABLE:
+               self.display_scan_results()
         
-        return self.found_paths
-    
+           return self.found_paths
+
     def check_url_status(self, url):
         """Check status URL dengan version detection yang lebih baik"""
         try:
