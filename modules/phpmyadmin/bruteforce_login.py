@@ -6,6 +6,8 @@ import sys
 import random
 import concurrent.futures
 from queue import Queue
+import re
+import urllib.parse
 
 # Suppress SSL warnings
 try:
@@ -136,7 +138,8 @@ class UltraFastTargetScanner:
         common_paths = [
             "", "/phpmyadmin", "/pma", "/myadmin", "/admin", 
             "/mysql", "/dbadmin", "/PMA", "/phpMyAdmin",
-            "/web/phpmyadmin", "/db/phpmyadmin", "/sql/phpmyadmin"
+            "/web/phpmyadmin", "/db/phpmyadmin", "/sql/phpmyadmin",
+            "/phpMyAdmin-5.1", "/phpMyAdmin-5.0", "/phpMyAdmin-4.9"
         ]
         
         if RICH_AVAILABLE:
@@ -164,7 +167,6 @@ class UltraFastTargetScanner:
             status_info = self.check_url_status(test_url)
             
             if status_info["accessible"]:
-                status_info.setdefault("version", self.extract_version_from_text(status_info.get("raw_text","") or ""))
                 self.found_paths.append(status_info)
                 if TQDM_AVAILABLE:
                     progress_bar.set_description(f"✅ Found: {path}")
@@ -180,106 +182,325 @@ class UltraFastTargetScanner:
         return self.found_paths
     
     def check_url_status(self, url):
-        """Check status URL"""
+        """Check status URL dengan version detection yang lebih baik"""
         try:
             response = requests.get(
                 url,
                 headers=self.headers,
                 verify=self.ssl_verify,
-                timeout=2,
+                timeout=5,
                 proxies=self.proxies,
                 allow_redirects=True
             )
-            html = response.text or ""
-            version = self.extract_version_from_text(html)
-            if version == "Unknown":
-               try:
-                  r2 = requests.get(f"{url.rstrip('/')}/index.php", headers=self.headers,
-                                   verify=self.ssl_verify, timeout=max(5, self.timeout),
-                                   proxies=self.proxies, allow_redirects=True)
-                  html2 = r2.text or ""
-                  version = self.extract_version_from_text(html2) or version
-                  if version != "Unknown":
-                     html = html2
-               except Exception as e:
-                  pass
-            if version == "Unknown":
-               import re, urllib.parse
-               scripts = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
-               for s in scripts[:8]:  # batasi
-                   try:
-                       script_url = urllib.parse.urljoin(response.url, s)
-                       rsc = requests.get(script_url, headers=self.headers,
-                                         verify=self.ssl_verify, timeout=max(4, self.timeout),
-                                         proxies=self.proxies, allow_redirects=True)
-                       version = self.extract_version_from_text(rsc.text or "") or version
-                       if version != "Unknown":
-                          break
-                   except Exception as e:
-                          continue
-            if version == "Unknown":
-                extras = ["/README", "/README.md", "/CHANGELOG", "/CHANGELOG.md", "/phpmyadmin/README",
-                          "/phpMyAdmin/README", "/setup", "/sql.php"]
-                import urllib.parse
-                for ex in extras:
-                    try:
-                        url_ex = urllib.parse.urljoin(response.url, ex)
-                        r3 = requests.get(url_ex, headers=self.headers,
-                                         verify=self.ssl_verify, timeout=max(4, self.timeout),
-                                         proxies=self.proxies, allow_redirects=True)
-                        version = self.extract_version_from_text(r3.text or "") or version
-                        if version != "Unknown":
-                           break
-                    except Exception as e:
-                           continue
+            
+            html = response.text
+            final_url = response.url
+            
+            # Enhanced version detection dengan multiple methods
+            version = self.detect_phpmyadmin_version(final_url, html, response.headers)
+            
             accessible = response.status_code in [200, 301, 302, 401, 403]
             
             return {
-                "url": url,
+                "url": final_url,
                 "status_code": response.status_code,
                 "accessible": accessible,
-                "ssl": url.startswith("https"),
+                "ssl": final_url.startswith("https"),
                 "server": response.headers.get('Server', 'N/A'),
-                "title": self.extract_title(response.text),
-                "raw_text": html,
-                "version": version or "Unknown",
+                "x_powered_by": response.headers.get('X-Powered-By', 'N/A'),
+                "title": self.extract_title(html),
+                "version": version,
+                "content_length": len(html),
             }
             
-    except Exception as e:
+        except Exception as e:
             return {
                 "url": url, 
                 "status_code": "ERROR", 
                 "accessible": False, 
-                "raw_text": "", 
                 "version": "Unknown",
+                "error": str(e)
             }
+    
+    def detect_phpmyadmin_version(self, url, html, headers):
+        """Detect phpMyAdmin version dengan multiple advanced methods"""
+        version = "Unknown"
+        
+        # Method 1: Check HTML content patterns
+        version = self.extract_version_from_html(html)
+        if version != "Unknown":
+            return version
+        
+        # Method 2: Check specific version files
+        version = self.check_version_files(url)
+        if version != "Unknown":
+            return version
+        
+        # Method 3: Check JavaScript files
+        version = self.check_js_files(html, url)
+        if version != "Unknown":
+            return version
+        
+        # Method 4: Check CSS files
+        version = self.check_css_files(html, url)
+        if version != "Unknown":
+            return version
+        
+        # Method 5: Check response headers
+        version = self.check_headers_for_version(headers)
+        if version != "Unknown":
+            return version
+        
+        # Method 6: Check URL path patterns
+        version = self.check_url_for_version(url)
+        if version != "Unknown":
+            return version
+        
+        # Method 7: Check common phpMyAdmin files
+        version = self.check_common_pma_files(url)
+        if version != "Unknown":
+            return version
+        
+        return "Unknown"
+    
+    def extract_version_from_html(self, html):
+        """Extract version dari HTML dengan patterns yang lebih komprehensif"""
+        if not html:
+            return "Unknown"
+        
+        text = html[:300000]  # Batasi untuk performance
+        
+        # Enhanced patterns untuk phpMyAdmin version detection
+        patterns = [
+            # Pattern 1: <!-- phpMyAdmin X.X.X -->
+            r'phpMyAdmin[^<]*?([0-9]+\.[0-9]+\.[0-9]+)',
+            # Pattern 2: Version: X.X.X
+            r'Version[:\s]*([0-9]+\.[0-9]+\.[0-9]+)',
+            # Pattern 3: vX.X.X
+            r'v([0-9]+\.[0-9]+\.[0-9]+)',
+            # Pattern 4: phpMyAdmin X.X
+            r'phpMyAdmin[^0-9]*([0-9]+\.[0-9]+)',
+            # Pattern 5: PMA_VERSION
+            r'PMA_VERSION[\s]*=[\s]*["\']([0-9\.]+)["\']',
+            # Pattern 6: Config version
+            r'\$.*?version[\s]*=[\s]*["\']([0-9\.]+)["\']',
+            # Pattern 7: Meta generator
+            r'<meta[^>]*content=["\'][^"\']*phpMyAdmin[^"\']*([0-9\.]+)',
+            # Pattern 8: Title version
+            r'<title>[^<]*phpMyAdmin[^<]*([0-9\.]+)',
+            # Pattern 9: Footer version
+            r'phpMyAdmin[^<]+([0-9]+\.[0-9]+\.[0-9]+)',
+            # Pattern 10: Inline version info
+            r'phpMyAdmin[\s\S]{0,200}?([0-9]+\.[0-9]+\.[0-9]+)',
+        ]
+        
+        for pattern in patterns:
+            try:
+                matches = re.findall(pattern, text, re.IGNORECASE)
+                for match in matches:
+                    if self.is_valid_version(match):
+                        return match
+            except:
+                continue
+        
+        return "Unknown"
+    
+    def check_version_files(self, base_url):
+        """Check file-file yang biasanya mengandung version info"""
+        version_files = [
+            "/README", "/README.md", "/DOCUMENTATION",
+            "/ChangeLog", "/CHANGELOG", "/RELEASE-DATE",
+            "/composer.json", "/package.json",
+            "/libraries/classes/Config.php",
+            "/libraries/common.inc.php",
+            "/doc/html/index.html",
+            "/Documentation.html"
+        ]
+        
+        for vfile in version_files:
+            try:
+                file_url = urllib.parse.urljoin(base_url, vfile)
+                response = requests.get(
+                    file_url,
+                    headers=self.headers,
+                    verify=self.ssl_verify,
+                    timeout=3,
+                    proxies=self.proxies
+                )
+                if response.status_code == 200:
+                    version = self.extract_version_from_text(response.text)
+                    if version != "Unknown":
+                        return f"{version} (from {vfile})"
+            except:
+                continue
+        
+        return "Unknown"
+    
+    def check_js_files(self, html, base_url):
+        """Check JavaScript files untuk version info"""
+        script_patterns = [
+            r'<script[^>]+src=["\']([^"\']+\.js)["\']',
+            r'src=["\'](js/[^"\']+\.js)["\']',
+            r'src=["\'](\./js/[^"\']+\.js)["\']'
+        ]
+        
+        all_scripts = []
+        for pattern in script_patterns:
+            all_scripts.extend(re.findall(pattern, html, re.IGNORECASE))
+        
+        # Prioritize main scripts
+        priority_scripts = ['common.js', 'config.js', 'functions.js', 'main.js', 'navigation.js']
+        for script in priority_scripts:
+            if any(script in s for s in all_scripts):
+                try:
+                    script_url = urllib.parse.urljoin(base_url, script)
+                    response = requests.get(
+                        script_url,
+                        headers=self.headers,
+                        verify=self.ssl_verify,
+                        timeout=3,
+                        proxies=self.proxies
+                    )
+                    if response.status_code == 200:
+                        version = self.extract_version_from_text(response.text)
+                        if version != "Unknown":
+                            return version
+                except:
+                    continue
+        
+        return "Unknown"
+    
+    def check_css_files(self, html, base_url):
+        """Check CSS files untuk version info"""
+        css_pattern = r'<link[^>]+href=["\']([^"\']+\.css)["\']'
+        css_files = re.findall(css_pattern, html, re.IGNORECASE)
+        
+        for css_file in css_files[:3]:  # Check first 3 CSS files
+            try:
+                css_url = urllib.parse.urljoin(base_url, css_file)
+                response = requests.get(
+                    css_url,
+                    headers=self.headers,
+                    verify=self.ssl_verify,
+                    timeout=3,
+                    proxies=self.proxies
+                )
+                if response.status_code == 200:
+                    # CSS biasanya punya comment dengan version
+                    if 'phpMyAdmin' in response.text:
+                        version = self.extract_version_from_text(response.text)
+                        if version != "Unknown":
+                            return version
+            except:
+                continue
+        
+        return "Unknown"
+    
+    def check_headers_for_version(self, headers):
+        """Check response headers untuk version info"""
+        header_checks = [
+            'X-Powered-By',
+            'Server',
+            'X-Generator',
+            'X-Version'
+        ]
+        
+        for header in header_checks:
+            value = headers.get(header, '')
+            if 'phpmyadmin' in value.lower():
+                version = self.extract_version_from_text(value)
+                if version != "Unknown":
+                    return f"{version} (from {header})"
+        
+        return "Unknown"
+    
+    def check_url_for_version(self, url):
+        """Check URL pattern untuk version clues"""
+        patterns = [
+            r'phpmyadmin[-\s]*([0-9]+\.[0-9]+\.[0-9]+)',
+            r'phpmyadmin[-\s]*([0-9]+\.[0-9]+)',
+            r'pma[-\s]*([0-9]+\.[0-9]+)',
+            r'phpMyAdmin-([0-9]+\.[0-9]+)'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, url, re.IGNORECASE)
+            for match in matches:
+                if self.is_valid_version(match):
+                    return match
+        
+        return "Unknown"
+    
+    def check_common_pma_files(self, base_url):
+        """Check common phpMyAdmin files untuk version info"""
+        common_files = [
+            "/version.txt",
+            "/VERSION",
+            "/LICENSE",
+            "/AUTHORS",
+            "/translators.html"
+        ]
+        
+        for file_path in common_files:
+            try:
+                file_url = urllib.parse.urljoin(base_url, file_path)
+                response = requests.get(
+                    file_url,
+                    headers=self.headers,
+                    verify=self.ssl_verify,
+                    timeout=3,
+                    proxies=self.proxies
+                )
+                if response.status_code == 200:
+                    version = self.extract_version_from_text(response.text)
+                    if version != "Unknown":
+                        return f"{version} (from {file_path})"
+            except:
+                continue
+        
+        return "Unknown"
+    
+    def extract_version_from_text(self, text):
+        """Extract version dari text biasa"""
+        if not text:
+            return "Unknown"
+        
+        patterns = [
+            r'([0-9]+\.[0-9]+\.[0-9]+)',
+            r'([0-9]+\.[0-9]+)',
+            r'v([0-9]+\.[0-9]+\.[0-9]+)',
+            r'version[:\s]*([0-9\.]+)'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, text)
+            for match in matches:
+                if self.is_valid_version(match):
+                    return match
+        
+        return "Unknown"
+    
+    def is_valid_version(self, version_str):
+        """Validate jika string adalah version yang valid"""
+        if not version_str:
+            return False
+        
+        # Basic version pattern: X.X atau X.X.X
+        if re.match(r'^\d+\.\d+(\.\d+)?$', version_str):
+            parts = version_str.split('.')
+            # Pastikan tidak terlalu besar (misal IP address)
+            if all(0 <= int(part) < 1000 for part in parts if part.isdigit()):
+                # Pastikan ini versi phpMyAdmin yang realistic
+                major_version = int(parts[0])
+                if 2 <= major_version <= 5:  # phpMyAdmin biasanya v2-v5
+                    return True
+        
+        return False
     
     def extract_title(self, html):
         """Extract title dari HTML"""
-        import re
         title_match = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
         return title_match.group(1) if title_match else "No Title"
-   
-    def extract_version_from_text(self, html):
-        import re
-        text = (html or "")[:200000]  # batasi untuk performa
-
-        m = re.search(r'phpmyadmin[\s\-:]*v?([\d]+\.[\d]+(?:\.[\d]+)?)', text, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        m = re.search(r'<!--\s*phpMyAdmin\s*([\d]+\.[\d]+(?:\.[\d]+)?)\s*-->', text, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        m = re.search(r'var\s+(?:pma_version|pmaVersion|PMA_VERSION)\s*[:=]\s*[\'"]([\d\.]+)[\'"]', text, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        m = re.search(r'<meta[^>]+content=["\'][^"\']*phpmyadmin[^"\']*([\d]+\.[\d]+(?:\.[\d]+)?)[^"\']*["\']', text, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        m = re.search(r'phpMyAdmin[^A-Za-z0-9]*?([\d]+\.[\d]+(?:\.[\d]+)?)', text, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        return "Unknown"
     
     def display_scan_results(self):
         """Display hasil scanning dengan panel"""
@@ -292,27 +513,34 @@ class UltraFastTargetScanner:
             show_header=True, 
             header_style="bold magenta"
         )
-        table.add_column("Status", style="bold", width=8)
-        table.add_column("URL", style="cyan", overflow="fold")
-        table.add_column("Code", justify="center", width=6)
-        table.add_column("Server", style="yellow", width=15)
-        table.add_column("SSL", justify="center", width=4)
-        table.add_column("Version", style="bold green", justify="center", width=12)
-
-        table.add_column("Title", style="green", width=25)
+        table.add_column("Status", style="bold", width=30)
+        table.add_column("URL", style="cyan", overflow="fold", width=30)
+        table.add_column("Code", justify="center", width=30)
+        table.add_column("Server", style="yellow", width=30)
+        table.add_column("SSL", justify="center", width=30)
+        table.add_column("Version", style="bold green", justify="center", width=30, overflow="fold")
+        #table.add_column("Title", style="green", width=30, overflow="fold")
         
         for result in self.found_paths:
             status_emoji = self.get_status_emoji(result['status_code'])
             ssl_icon = "🔐" if result["ssl"] else "🌐"
             status_code = result['status_code']
             version = result.get("version", "Unknown")
+            
+            # Color code version
+            version_display = version
+            if version != "Unknown":
+                version_display = f"[green]{version}[/green]"
+            else:
+                version_display = f"[yellow]{version}[/yellow]"
+            
             table.add_row(
                 f"{status_emoji}",
                 f"{result['url']}",
                 f"[bold]{status_code}[/bold]",
                 result['server'][:15],
                 ssl_icon,
-                str(version),
+                version_display,
                 result['title'][:25] if result['title'] != "No Title" else "No Title"
             )
         
@@ -342,7 +570,7 @@ class UltraFastLoginChecker:
         text = response.text.lower()
         
         # Very quick success checks
-        if any(indicator in text for indicator in ["mainframeset", "navigation.php", "server version"]):
+        if any(indicator in text for indicator in ["mainframeset", "navigation.php", "server version", "frameborder"]):
             return True
         
         # Very quick failure checks  
@@ -351,6 +579,8 @@ class UltraFastLoginChecker:
         
         # Quick content-based decision
         return len(response.text) > 3000 and "login" not in text
+
+# ... (Class UltraFastPhpMyAdminBruteforce dan function run tetap sama seperti sebelumnya)
 
 class UltraFastPhpMyAdminBruteforce:
     """Main class untuk bruteforce dengan progress bar yang tepat"""
@@ -660,7 +890,6 @@ class UltraFastPhpMyAdminBruteforce:
             
         console.print("\n" + "="*60)
         
-        # PERBAIKAN: String yang benar
         summary_content = (
             f"🎯 [bold cyan]Target:[/bold cyan] {self.options.get('TARGET')}\n"
             f"⏰ [bold yellow]Total Attempts:[/bold yellow] {self.results['attempts']:,}\n"

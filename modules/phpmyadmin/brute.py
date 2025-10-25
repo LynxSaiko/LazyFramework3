@@ -164,7 +164,7 @@ class UltraFastTargetScanner:
             status_info = self.check_url_status(test_url)
             
             if status_info["accessible"]:
-                status_info.setdefault("version", self.extract_version_from_text(status_info.get("raw_text","") or ""))
+                status_info["version"] = self.extract_version_from_text(status_info.get("raw_text", "") or "")
                 self.found_paths.append(status_info)
                 if TQDM_AVAILABLE:
                     progress_bar.set_description(f"✅ Found: {path}")
@@ -192,46 +192,66 @@ class UltraFastTargetScanner:
             )
             html = response.text or ""
             version = self.extract_version_from_text(html)
+            
             if version == "Unknown":
-               try:
-                  r2 = requests.get(f"{url.rstrip('/')}/index.php", headers=self.headers,
-                                   verify=self.ssl_verify, timeout=max(5, self.timeout),
-                                   proxies=self.proxies, allow_redirects=True)
-                  html2 = r2.text or ""
-                  version = self.extract_version_from_text(html2) or version
-                  if version != "Unknown":
-                     html = html2
-               except Exception as e:
-                  pass
+                try:
+                    r2 = requests.get(
+                        f"{url.rstrip('/')}/index.php", 
+                        headers=self.headers,
+                        verify=self.ssl_verify, 
+                        timeout=max(5, self.timeout),
+                        proxies=self.proxies, 
+                        allow_redirects=True
+                    )
+                    html2 = r2.text or ""
+                    version = self.extract_version_from_text(html2) or version
+                    if version != "Unknown":
+                        html = html2
+                except Exception as e:
+                    pass
+            
             if version == "Unknown":
-               import re, urllib.parse
-               scripts = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
-               for s in scripts[:8]:  # batasi
-                   try:
-                       script_url = urllib.parse.urljoin(response.url, s)
-                       rsc = requests.get(script_url, headers=self.headers,
-                                         verify=self.ssl_verify, timeout=max(4, self.timeout),
-                                         proxies=self.proxies, allow_redirects=True)
-                       version = self.extract_version_from_text(rsc.text or "") or version
-                       if version != "Unknown":
-                          break
-                   except Exception as e:
-                          continue
+                import re
+                import urllib.parse
+                scripts = re.findall(r'<script[^>]+src=["\']([^"\']+)["\']', html, re.IGNORECASE)
+                for s in scripts[:8]:  # batasi
+                    try:
+                        script_url = urllib.parse.urljoin(response.url, s)
+                        rsc = requests.get(
+                            script_url, 
+                            headers=self.headers,
+                            verify=self.ssl_verify, 
+                            timeout=max(4, self.timeout),
+                            proxies=self.proxies, 
+                            allow_redirects=True
+                        )
+                        version = self.extract_version_from_text(rsc.text or "") or version
+                        if version != "Unknown":
+                            break
+                    except Exception as e:
+                        continue
+            
             if version == "Unknown":
                 extras = ["/README", "/README.md", "/CHANGELOG", "/CHANGELOG.md", "/phpmyadmin/README",
-                          "/phpMyAdmin/README", "/setup", "/sql.php"]
+                         "/phpMyAdmin/README", "/setup", "/sql.php"]
                 import urllib.parse
                 for ex in extras:
                     try:
                         url_ex = urllib.parse.urljoin(response.url, ex)
-                        r3 = requests.get(url_ex, headers=self.headers,
-                                         verify=self.ssl_verify, timeout=max(4, self.timeout),
-                                         proxies=self.proxies, allow_redirects=True)
+                        r3 = requests.get(
+                            url_ex, 
+                            headers=self.headers,
+                            verify=self.ssl_verify, 
+                            timeout=max(4, self.timeout),
+                            proxies=self.proxies, 
+                            allow_redirects=True
+                        )
                         version = self.extract_version_from_text(r3.text or "") or version
                         if version != "Unknown":
-                           break
+                            break
                     except Exception as e:
-                           continue
+                        continue
+            
             accessible = response.status_code in [200, 301, 302, 401, 403]
             
             return {
@@ -245,7 +265,7 @@ class UltraFastTargetScanner:
                 "version": version or "Unknown",
             }
             
-    except Exception as e:
+        except Exception as e:
             return {
                 "url": url, 
                 "status_code": "ERROR", 
@@ -261,24 +281,35 @@ class UltraFastTargetScanner:
         return title_match.group(1) if title_match else "No Title"
    
     def extract_version_from_text(self, html):
+        """Extract version dari text/html"""
         import re
         text = (html or "")[:200000]  # batasi untuk performa
 
+        # Pattern 1: phpmyadmin vX.X.X
         m = re.search(r'phpmyadmin[\s\-:]*v?([\d]+\.[\d]+(?:\.[\d]+)?)', text, re.IGNORECASE)
         if m:
             return m.group(1)
+        
+        # Pattern 2: HTML comment
         m = re.search(r'<!--\s*phpMyAdmin\s*([\d]+\.[\d]+(?:\.[\d]+)?)\s*-->', text, re.IGNORECASE)
         if m:
             return m.group(1)
+        
+        # Pattern 3: JavaScript variable
         m = re.search(r'var\s+(?:pma_version|pmaVersion|PMA_VERSION)\s*[:=]\s*[\'"]([\d\.]+)[\'"]', text, re.IGNORECASE)
         if m:
             return m.group(1)
+        
+        # Pattern 4: Meta tag
         m = re.search(r'<meta[^>]+content=["\'][^"\']*phpmyadmin[^"\']*([\d]+\.[\d]+(?:\.[\d]+)?)[^"\']*["\']', text, re.IGNORECASE)
         if m:
             return m.group(1)
+        
+        # Pattern 5: General phpMyAdmin version
         m = re.search(r'phpMyAdmin[^A-Za-z0-9]*?([\d]+\.[\d]+(?:\.[\d]+)?)', text, re.IGNORECASE)
         if m:
             return m.group(1)
+        
         return "Unknown"
     
     def display_scan_results(self):
@@ -298,7 +329,6 @@ class UltraFastTargetScanner:
         table.add_column("Server", style="yellow", width=15)
         table.add_column("SSL", justify="center", width=4)
         table.add_column("Version", style="bold green", justify="center", width=12)
-
         table.add_column("Title", style="green", width=25)
         
         for result in self.found_paths:
@@ -660,7 +690,6 @@ class UltraFastPhpMyAdminBruteforce:
             
         console.print("\n" + "="*60)
         
-        # PERBAIKAN: String yang benar
         summary_content = (
             f"🎯 [bold cyan]Target:[/bold cyan] {self.options.get('TARGET')}\n"
             f"⏰ [bold yellow]Total Attempts:[/bold yellow] {self.results['attempts']:,}\n"
