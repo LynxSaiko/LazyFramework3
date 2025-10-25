@@ -171,13 +171,13 @@ class UltraFastTargetScanner:
             if status_info["accessible"]:
                 self.found_paths.append(status_info)
                 if TQDM_AVAILABLE:
-                    progress_bar.set_description(f"✅ Found: {path}")
+                    self.progress_bar.set_description(f"✅ Found: {path}")
                 break
             if TQDM_AVAILABLE:
                 self.progress_bar.update(1)
         
         if TQDM_AVAILABLE:
-            progress_bar.close()
+            self.progress_bar.close()
         
         # Tampilkan hasil scan
         if self.found_paths and RICH_AVAILABLE:
