@@ -154,19 +154,17 @@ class UltraFastTargetScanner:
         
         # Progress bar untuk scanning
         if TQDM_AVAILABLE:
-            progress_bar = tqdm(
-                common_paths,
+            self.progress_bar = tqdm(
+                total=len(common_paths),
                 desc="Scanning Paths",
                 unit="path",
                 ncols=70,
                 bar_format="{l_bar}{bar:30}| {n_fmt}/{total_fmt} paths",
                 position=0,  # Pastikan di position 0
-                leave=False   # Jangan tinggalkan progress bar setelah selesai
+                leave=True   # Jangan tinggalkan progress bar setelah selesai
             )
-        else:
-            progress_bar = common_paths
-        
-        for path in progress_bar:
+
+        for path in common_paths:
             test_url = f"{self.base_target.rstrip('/')}{path}"
             status_info = self.check_url_status(test_url)
             
@@ -175,6 +173,8 @@ class UltraFastTargetScanner:
                 if TQDM_AVAILABLE:
                     progress_bar.set_description(f"✅ Found: {path}")
                 break
+            if TQDM_AVAILABLE:
+                self.progress_bar.update(1)
         
         if TQDM_AVAILABLE:
             progress_bar.close()
