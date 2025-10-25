@@ -135,58 +135,175 @@ class UltraFastTargetScanner:
         self.proxies = proxies
         self.found_paths = []
     
-    def scan_paths(self):
-        """Scan path dengan threading maksimal"""
+    def generate_paths_from_url(self, url):
+        """Generate common paths berdasarkan URL target"""
+        from urllib.parse import urlparse
+        
+        parsed = urlparse(url)
+        base_domain = parsed.netloc
+        base_path = parsed.path
+        
+        # Ekstrak bagian dari domain untuk pattern
+        domain_parts = base_domain.split('.')
+        domain_name = domain_parts[0] if domain_parts and domain_parts[0] not in ['www', 'http', 'https'] else "admin"
+        
+        # Extended phpMyAdmin paths dengan versi terbaru
         common_paths = [
+            # Basic phpMyAdmin paths
             "", "/phpmyadmin", "/pma", "/myadmin", "/admin", 
             "/mysql", "/dbadmin", "/PMA", "/phpMyAdmin",
+            
+            # Domain-based paths
+            f"/{domain_name}", f"/{domain_name}admin", f"/{domain_name}_admin",
+            f"/{domain_name}-admin", f"/{domain_name}mysql", f"/{domain_name}db",
+            
+            # Subdirectory paths
             "/web/phpmyadmin", "/db/phpmyadmin", "/sql/phpmyadmin",
-            "/phpMyAdmin-5.1", "/phpMyAdmin-5.0", "/phpMyAdmin-4.9"
+            "/admin/phpmyadmin", "/mysql/phpmyadmin", "/phpmyadmin2",
+            "/public/phpmyadmin", "/assets/phpmyadmin", "/static/phpmyadmin",
+            
+            # Version specific paths (sampai versi 6+)
+            "/phpMyAdmin-6.0", "/phpMyAdmin-5.2", "/phpMyAdmin-5.1", 
+            "/phpMyAdmin-5.0", "/phpMyAdmin-4.9", "/phpMyAdmin-4.8",
+            "/phpMyAdmin-4.7", "/phpMyAdmin-4.6", "/phpMyAdmin-4.5",
+            "/phpMyAdmin-4.4", "/phpMyAdmin-4.3", "/phpMyAdmin-4.2",
+            "/phpMyAdmin-4.1", "/phpMyAdmin-4.0", "/phpMyAdmin-3.5",
+            
+            # Newer version patterns
+            "/pma6", "/pma5", "/pma4", "/myadmin6", "/myadmin5",
+            
+            # Alternative names
+            "/db", "/sql", "/database", "/dba", "/mysql-admin",
+            "/myadmin", "/adminer", "/phpsql", "/websql", "/webdb",
+            "/dbweb", "/phpmy", "/mysqladmin", "/mysqldb",
+            
+            # Common CMS integrations
+            "/cpanel", "/whm", "/plesk", "/webmin", "/directadmin",
+            "/xampp", "/wamp", "/lampp", "/mamp", "/ampps",
+            
+            # Development paths
+            "/dev/phpmyadmin", "/test/phpmyadmin", "/demo/phpmyadmin",
+            "/stage/phpmyadmin", "/staging/phpmyadmin",
+            
+            # Hidden paths
+            "/_phpmyadmin", "/_pma", "/.phpmyadmin", "/.pma",
+            "/hidden/phpmyadmin", "/secret/phpmyadmin", "/private/phpmyadmin",
+            
+            # Backup paths
+            "/backup/phpmyadmin", "/bak/phpmyadmin", "/old/phpmyadmin",
+            "/new/phpmyadmin", "/temp/phpmyadmin",
+            
+            # Common patterns
+            "/phpMyAdmin-%", "/pma-%", "/phpmyadmin_old", "/phpmyadmin_new",
+            "/phpmyadmin2024", "/phpmyadmin2023", "/phpmyadmin2022",
+            
+            # Reverse proxy common paths
+            "/tools/phpmyadmin", "/apps/phpmyadmin", "/util/phpmyadmin",
+            "/manager/phpmyadmin", "/system/phpmyadmin", "/control/phpmyadmin",
         ]
         
+        # Remove duplicates and empty strings, then return
+        unique_paths = list(dict.fromkeys([p for p in common_paths if p is not None]))
+        return unique_paths
+    
+    def is_valid_version(self, version_str):
+        """Validate jika string adalah version yang valid (sampai versi 6+)"""
+        if not version_str:
+            return False
+        
+        if re.match(r'^\d+\.\d+(\.\d+)?$', version_str):
+            parts = version_str.split('.')
+            if all(0 <= int(part) < 1000 for part in parts if part.isdigit()):
+                major_version = int(parts[0])
+                # Support phpMyAdmin versi 2 sampai 6+
+                if 2 <= major_version <= 6:
+                    return True
+        
+        return False
+    
+    def scan_paths(self):
+        """Scan path dengan common paths yang digenerate dari URL"""
+        # Generate paths dari URL target
+        common_paths = self.generate_paths_from_url(self.base_target) 
+        total = len(common_paths)
+        
         if RICH_AVAILABLE:
+            from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
+            progress_columns = [
+                TextColumn("{task.description}"),
+                BarColumn(bar_width=None),
+                TextColumn("{task.completed}/{task.total}"),
+                TimeElapsedColumn(),
+                TimeRemainingColumn(),
+             ]
+        
+             def build_status_panel(current_path, tested_count, found_count):
+                 table = Table.grid(expand=True)
+                 table.add_column(ratio=3)
+                 table.add_column(ratio=1, justify="right")
+                 left = (
+                    f"🔄 Testing: [bold]{current_path}[/bold]"
+                    f"🧭 Tested: [cyan]{tested_count}/{total}[/cyan]"
+                    f"✅ Found: [green]{found_count}[/green]"
+                 )
+                 right = f"Target: [bold]{self.base_target}[/bold]"
+                 table.add_row(left, right)
+                 return Panel(table, title="📡 Scan Status", border_style="magenta", padding=(1, 2))
+
+             with Progress(*progress_columns, console=console, transient=False) as progress:
+                 task = progress.add_task("Scanning paths...", total=total)
+                 with Live(build_status_panel("-", 0, 0), refresh_per_second=6, console=console) as live:
+                     tested = 0
+                     found_count = 0
+                     for path in common_paths:
+                         current_path = path or "/"
+                         progress.update(task, description=f"Testing: {current_path}", advance=1)
+                         test_url = f"{self.base_target.rstrip('/')}" + current_path
+                         status_info = self.check_url_status(test_url)
+                         tested += 1
+                         if status_info.get("accessible"):
+                             self.found_paths.append(status_info)
+                             found_count += 1
+
+                         # update live panel with concise info
+                         live.update(build_status_panel(current_path, tested, found_count))
+                         # tiny sleep to avoid terminal flooding when scanning extremely fast
+                         time.sleep(0.005)
+         else:
+             # fallback behavior: tqdm or simple loop
+             if TQDM_AVAILABLE:
+                progress_bar = tqdm(total=total, desc="Scanning paths", unit="path", ncols=80)
+             else:
+                progress_bar = None
+             found_count = 0
+             tested = 0
+             for path in common_paths:
+                 tested += 1
+                 test_url = f"{self.base_target.rstrip('/')}" + (path or "/")
+                 if TQDM_AVAILABLE:
+                     tqdm.write(f"🔍 [{tested:3d}/{total:3d}] Testing: {path or '/'}")
+                 status_info = self.check_url_status(test_url)
+                 if progress_bar:
+                     progress_bar.update(1)
+                 if status_info.get("accessible"):
+                     self.found_paths.append(status_info)
+                     found_count += 1
+                     if TQDM_AVAILABLE:
+                         tqdm.write(f"✅ FOUND: {path or '/'} -> {status_info['url']}")
+              if progress_bar:
+                  progress_bar.close()
+        if self.found_paths and RICH_AVAILABLE:
+            self.display_scan_results()
+        elif not self.found_paths and RICH_AVAILABLE:
             console.print(Panel(
-                "🔍 [bold cyan]Target Discovery Phase[/bold cyan]\n"
-                "🔄 Scanning common phpMyAdmin paths...",
-                border_style="cyan",
+                "❌ [bold red]No accessible phpMyAdmin paths found![/bold red]"
+                f"💡 Tried {len(common_paths)} different paths"
+                f"💡 Support: phpMyAdmin v2.0 - v6.0+"
+                "💡 The target might not have phpMyAdmin installed or uses custom path",
+                border_style="red",
                 padding=(1, 2)
             ))
-        progress_bar = None
-        # Progress bar untuk scanning
-        if TQDM_AVAILABLE:
-           progress_bar = tqdm(
-                total=len(common_paths),
-                desc="Scanning Paths",
-                unit="path",
-                ncols=80,
-                bar_format="{l_bar}{bar:40}| {n_fmt}/{total_fmt} paths",
-                position=0,  # Pastikan di position 0
-                leave=True   # Jangan tinggalkan progress bar setelah selesai
-            )
-
-            
-            for path in common_paths:
-                test_url = f"{self.base_target.rstrip('/')}{path}"
-                if TQDM_AVAILABLE and progress_bar:
-                    progress_bar.set_description(f"🔍 Scanning: {path}")
-                status_info = self.check_url_status(test_url)
-                # Update progress bar
-                if TQDM_AVAILABLE and progress_bar:
-                    progress_bar.update(1)
-
-                if status_info["accessible"]:
-                    self.found_paths.append(status_info)
-                    if TQDM_AVAILABLE and progress_bar:
-                       progress_bar.set_description(f"✅ Found: {path}")
-                    break
-           if TQDM_AVAILABLE and progress_bar:
-               progress_bar.close()
-          
-        # Tampilkan hasil scan
-           if self.found_paths and RICH_AVAILABLE:
-               self.display_scan_results()
-        
-           return self.found_paths
+        return self.found_paths
 
     def check_url_status(self, url):
         """Check status URL dengan version detection yang lebih baik"""
